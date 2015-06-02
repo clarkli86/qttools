@@ -47,6 +47,7 @@
 #  include <delayimp.h>
 #else // Q_OS_WIN
 #  include <sys/wait.h>
+#  include <sys/mman.h>
 #  include <sys/types.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
@@ -612,12 +613,47 @@ bool readElfExecutable(const QString &elfExecutableFileName, QString *errorMessa
     return true;
 }
 
-#ifdef Q_OS_WIN
 
 static inline QString stringFromRvaPtr(const void *rvaPtr)
 {
     return QString::fromLocal8Bit((const char *)rvaPtr);
 }
+
+#ifndef Q_OS_WIN
+using BYTE = uint8_t;
+using DWORD = uint32_t;
+using WORD = uint16_t;
+using USHORT = uint16_t;
+using LONG = int32_t;
+using ULONG = uint32_t;
+using PVOID = void*;
+using UCHAR = uint8_t;
+using UCHAR = uint8_t;
+using ULONG_PTR = uint32_t*;
+using PULONG = uint32_t*;
+using PCHAR = char*;
+using BOOLEAN = bool;
+#define FIELD_OFFSET(type, member) offsetof(type, member)
+#define IN
+#define OUT
+#define UNALIGNED
+#define OPTIONAL
+static bool IsBadReadPtr(const void *, size_t) { return false; }
+#include "winnt.h"
+typedef DWORD                       RVA;
+
+typedef struct ImgDelayDescr {
+    DWORD           grAttrs;        // attributes
+    RVA             rvaDLLName;     // RVA to dll name
+    RVA             rvaHmod;        // RVA of module handle
+    RVA             rvaIAT;         // RVA of the IAT
+    RVA             rvaINT;         // RVA of the INT
+    RVA             rvaBoundIAT;    // RVA of the optional bound IAT
+    RVA             rvaUnloadIAT;   // RVA of optional copy of original IAT
+    DWORD           dwTimeStamp;    // 0 if not bound,
+                                    // O.W. date/time stamp of DLL bound to (Old BIND)
+    } ImgDelayDescr, * PImgDelayDescr;
+#endif
 
 // Helper for reading out PE executable files: Find a section header for an RVA
 // (IMAGE_NT_HEADERS64, IMAGE_NT_HEADERS32).
@@ -723,6 +759,7 @@ inline QStringList readImportSections(const ImageNtHeader *ntHeaders, const void
     return result;
 }
 
+#ifdef Q_OS_WIN
 // Read a PE executable and determine dependent libraries, word size
 // and debug flags.
 bool readPeExecutable(const QString &peExecutableFileName, QString *errorMessage,
@@ -865,11 +902,94 @@ QString findD3dCompiler(Platform platform, const QString &qtBinDir, unsigned wor
 
 #else // Q_OS_WIN
 
-bool readPeExecutable(const QString &, QString *errorMessage,
-                      QStringList *, unsigned *, bool *, bool)
+bool readPeExecutable(const QString &peExecutableFileName, QString *errorMessage,
+                      QStringList *dependentLibrariesIn, unsigned *wordSizeIn,
+                      bool *isDebugIn, bool isMinGW)
 {
-    *errorMessage = QStringLiteral("Not implemented.");
-    return false;
+    bool result = false;
+    int hFile = 0;
+    void *fileMemory = 0;
+
+    if (dependentLibrariesIn)
+        dependentLibrariesIn->clear();
+    if (wordSizeIn)
+        *wordSizeIn = 0;
+    if (isDebugIn)
+        *isDebugIn = false;
+
+    struct stat st;
+    stat(peExecutableFileName.toStdString().c_str(), &st);
+
+    do {
+
+        // Create a memory mapping of the file
+        hFile = open(peExecutableFileName.toStdString().c_str(), O_RDONLY);
+
+        if (hFile < 0) {
+            *errorMessage = QString::fromLatin1("Cannot open '%1': %2").arg(peExecutableFileName, errno);
+            break;
+        }
+        // Let the kernel choose an address for us
+        fileMemory = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, hFile, 0);
+        if (fileMemory == MAP_FAILED) {
+            *errorMessage = QString::fromLatin1("Cannot map '%1': %2").arg(peExecutableFileName, errno);
+            break;
+        }
+
+        const IMAGE_NT_HEADERS *ntHeaders = getNtHeader(fileMemory, errorMessage);
+        if (!ntHeaders)
+            break;
+
+        const unsigned wordSize = ntHeaderWordSize(ntHeaders);
+        if (wordSizeIn)
+            *wordSizeIn = wordSize;
+        bool debug = false;
+        if (wordSize == 32) {
+            const IMAGE_NT_HEADERS32 *ntHeaders32 = reinterpret_cast<const IMAGE_NT_HEADERS32 *>(ntHeaders);
+
+            if (!isMinGW) {
+                debug = ntHeaders32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+            } else {
+                // Use logic that's used e.g. in objdump / pfd library
+                debug = !(ntHeaders32->FileHeader.Characteristics & IMAGE_FILE_DEBUG_STRIPPED);
+            }
+
+            if (dependentLibrariesIn)
+                *dependentLibrariesIn = readImportSections(ntHeaders32, fileMemory, errorMessage);
+
+        } else {
+// TODO Fix 64-bit
+#if 0
+            const IMAGE_NT_HEADERS64 *ntHeaders64 = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(ntHeaders);
+
+            if (!isMinGW) {
+                debug = ntHeaders64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+            } else {
+                // Use logic that's used e.g. in objdump / pfd library
+                debug = !(ntHeaders64->FileHeader.Characteristics & IMAGE_FILE_DEBUG_STRIPPED);
+            }
+
+            if (dependentLibrariesIn)
+                *dependentLibrariesIn = readImportSections(ntHeaders64, fileMemory, errorMessage);
+#endif
+        }
+
+        if (isDebugIn)
+            *isDebugIn = debug;
+        result = true;
+        if (optVerboseLevel > 1)
+            std::wcout << __FUNCTION__ << ": " << peExecutableFileName
+                       << ' ' << wordSize << " bit, debug: " << debug << '\n';
+    } while (false);
+
+    if (fileMemory)
+        munmap(fileMemory, st.st_size);
+
+    if (hFile > 0)
+        close(hFile);
+
+    return result;
+
 }
 
 QString findD3dCompiler(Platform, const QString &, unsigned)

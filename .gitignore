@@ -207,6 +207,11 @@ doc-build
 .rcc
 .pch
 .metadata
+bin
+mkspecs
+
+# cscope
+cscope.out
 
 # Symbian build system generated files
 # ---------------------
