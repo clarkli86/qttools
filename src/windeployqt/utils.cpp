@@ -629,8 +629,8 @@ using ULONG = uint32_t;
 using PVOID = void*;
 using UCHAR = uint8_t;
 using UCHAR = uint8_t;
-using ULONG_PTR = uint32_t*;
-using PULONG = uint32_t*;
+using ULONG_PTR = void*;
+using PULONG = void*;
 using PCHAR = char*;
 using BOOLEAN = bool;
 #define FIELD_OFFSET(type, member) offsetof(type, member)
