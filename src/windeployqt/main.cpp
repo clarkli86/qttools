@@ -46,6 +46,7 @@
 #include <QtCore/QVector>
 
 #include <iostream>
+#include <functional>
 
 QT_BEGIN_NAMESPACE
 
@@ -261,6 +262,7 @@ struct Options {
     QString directory;
     QString translationsDirectory; // Translations target directory
     QString libraryDirectory;
+    QString compilerRunTimeDirectory; // Path of compiler runtime (mingw, etc)
     QStringList binaries;
     JsonOutput *json;
     ListOption list;
@@ -369,6 +371,11 @@ static inline int parseArguments(const QStringList &arguments, QCommandLineParse
                                              QStringLiteral("Deploy compiler runtime (Desktop only)."));
     parser->addOption(compilerRunTimeOption);
 
+    QCommandLineOption compilerRunTimeDirOption(QStringLiteral("compiler-runtime-dir"),
+                                           QStringLiteral("Path of compiler runtime (Desktop only)."),
+                                           QStringLiteral("compiler-runtime-directory"));
+    parser->addOption(compilerRunTimeDirOption);
+
     QCommandLineOption noCompilerRunTimeOption(QStringLiteral("no-compiler-runtime"),
                                              QStringLiteral("Do not deploy compiler runtime (Desktop only)."));
     parser->addOption(noCompilerRunTimeOption);
@@ -451,6 +458,7 @@ static inline int parseArguments(const QStringList &arguments, QCommandLineParse
         options->compilerRunTime = true;
     else if (parser->isSet(noCompilerRunTimeOption))
         options->compilerRunTime = false;
+    options->compilerRunTimeDirectory = parser->value(compilerRunTimeDirOption);
 
     if (options->compilerRunTime && options->platform != WindowsMinGW && options->platform != Windows) {
         *errorMessage = QStringLiteral("Deployment of the compiler runtime is implemented for Desktop only.");
@@ -639,8 +647,9 @@ static inline bool isQtModule(const QString &libName)
 }
 
 // Helper for recursively finding all dependent Qt libraries.
-static bool findDependentQtLibraries(const QString &qtBinDir, const QString &binary, Platform platform,
+static bool findDependentLibraries(const QString &binDir, const QString &binary, Platform platform,
                                      QString *errorMessage, QStringList *result,
+                                     std::function<bool(const QString&)> filter = nullptr,
                                      unsigned *wordSize = 0, bool *isDebug = 0,
                                      int *directDependencyCount = 0, int recursionDepth = 0)
 {
@@ -656,8 +665,8 @@ static bool findDependentQtLibraries(const QString &qtBinDir, const QString &bin
     // are run the 2nd time (updating). We want to check against the Qt bin dir libraries
     const int start = result->size();
     foreach (const QString &lib, dependentLibs) {
-        if (isQtModule(lib)) {
-            const QString path = normalizeFileName(qtBinDir + QLatin1Char('/') + QFileInfo(lib).fileName());
+        if (!filter || filter(lib)) {
+            const QString path = normalizeFileName(binDir + QLatin1Char('/') + QFileInfo(lib).fileName());
             if (!result->contains(path))
                 result->append(path);
         }
@@ -667,7 +676,7 @@ static bool findDependentQtLibraries(const QString &qtBinDir, const QString &bin
         *directDependencyCount = end - start;
     // Recurse
     for (int i = start; i < end; ++i)
-        if (!findDependentQtLibraries(qtBinDir, result->at(i), platform, errorMessage, result, 0, 0, 0, recursionDepth + 1))
+        if (!findDependentLibraries(binDir, result->at(i), platform, errorMessage, result, filter, 0, 0, 0, recursionDepth + 1))
             return false;
     return true;
 }
@@ -814,7 +823,8 @@ QStringList findQtPlugins(quint64 *usedQtModules, quint64 disabledQtModules,
                     *platformPlugin = pluginPath;
                 QStringList dependentQtLibs;
                 quint64 neededModules = 0;
-                if (findDependentQtLibraries(libraryLocation, pluginPath, platform, &errorMessage, &dependentQtLibs)) {
+                if (findDependentLibraries(libraryLocation, pluginPath, platform, &errorMessage, &dependentQtLibs,
+                            std::bind(isQtModule, std::placeholders::_1))) {
                     for (int d = 0; d < dependentQtLibs.size(); ++ d)
                         neededModules |= qtModule(dependentQtLibs.at(d));
                 } else {
@@ -921,15 +931,21 @@ static QString libraryPath(const QString &libraryLocation, const char *name,
     return result;
 }
 
-static QStringList compilerRunTimeLibs(Platform platform, unsigned wordSize)
+static QStringList compilerRunTimeLibs(Platform platform, const QString & compilerRunTimeDirectory, QStringList dependentLibs, unsigned wordSize)
 {
     QStringList result;
     switch (platform) {
     case WindowsMinGW: { // MinGW: Add runtime libraries
         static const char *minGwRuntimes[] = {"*gcc_", "*stdc++", "*winpthread"};
-        const QString gcc = findInPath(QStringLiteral("g++.exe"));
-        if (gcc.isEmpty())
+        QString gcc = compilerRunTimeDirectory;
+        if(gcc.isEmpty()) {
+            // Dir not set, try finding it in PATH
+            gcc = findInPath(QStringLiteral("g++.exe"));
+        }
+        if (gcc.isEmpty()) {
             break;
+        }
+
         const QString binPath = QFileInfo(gcc).absolutePath();
         QDir dir(binPath);
         QStringList filters;
@@ -937,8 +953,16 @@ static QStringList compilerRunTimeLibs(Platform platform, unsigned wordSize)
         const size_t count = sizeof(minGwRuntimes) / sizeof(minGwRuntimes[0]);
         for (size_t i = 0; i < count; ++i)
             filters.append(QLatin1String(minGwRuntimes[i]) + suffix);
-        foreach (const QString &dll, dir.entryList(filters, QDir::Files))
-                result.append(binPath + QLatin1Char('/') + dll);
+        foreach (const QString &dll, dir.entryList(filters, QDir::Files)) {
+            QString dllFile = binPath + QLatin1Char('/') + dll;
+            result.append(dllFile);
+        }
+
+        // Find all dependencies in compiler runtime director
+        for(auto & lib : dependentLibs) {
+            QString errorMessage;
+            findDependentLibraries(binPath, lib, platform, &errorMessage, &result);
+        }
     }
         break;
     case Windows: { // MSVC/Desktop: Add redistributable packages.
@@ -1020,12 +1044,14 @@ static DeployResult deploy(const Options &options,
     bool detectedDebug;
     unsigned wordSize;
     int directDependencyCount = 0;
-    if (!findDependentQtLibraries(libraryLocation, options.binaries.first(), options.platform, errorMessage, &dependentQtLibs, &wordSize,
+    if (!findDependentLibraries(libraryLocation, options.binaries.first(), options.platform, errorMessage, &dependentQtLibs,
+                std::bind(isQtModule, std::placeholders::_1), &wordSize,
                                   &detectedDebug, &directDependencyCount)) {
         return result;
     }
     for (int b = 1; b < options.binaries.size(); ++b) {
-        if (!findDependentQtLibraries(libraryLocation, options.binaries.at(b), options.platform, errorMessage, &dependentQtLibs,
+        if (!findDependentLibraries(libraryLocation, options.binaries.at(b), options.platform, errorMessage, &dependentQtLibs,
+                                      std::bind(isQtModule, std::placeholders::_1),
                                       Q_NULLPTR, Q_NULLPTR, Q_NULLPTR)) {
             return result;
         }
@@ -1069,7 +1095,8 @@ static DeployResult deploy(const Options &options,
         const QStringList qtLibs = dependentQtLibs.filter(QStringLiteral("Qt5Core"), Qt::CaseInsensitive)
             + dependentQtLibs.filter(QStringLiteral("Qt5WebKit"), Qt::CaseInsensitive);
         foreach (const QString &qtLib, qtLibs) {
-            QStringList icuLibs = findDependentLibraries(qtLib, options.platform, errorMessage).filter(QStringLiteral("ICU"), Qt::CaseInsensitive);
+            QStringList icuLibs = findDependentLibraries(qtLib, options.platform, errorMessage)
+                                    .filter(QStringLiteral("ICU"), Qt::CaseInsensitive);
             if (!icuLibs.isEmpty()) {
                 // Find out the ICU version to add the data library icudtXX.dll, which does not show
                 // as a dependency.
@@ -1114,7 +1141,8 @@ static DeployResult deploy(const Options &options,
             qmlScanResult.append(scanResult);
             // Additional dependencies of QML plugins.
             foreach (const QString &plugin, qmlScanResult.plugins) {
-                if (!findDependentQtLibraries(libraryLocation, plugin, options.platform, errorMessage, &dependentQtLibs, &wordSize, &detectedDebug))
+                if (!findDependentLibraries(libraryLocation, plugin, options.platform, errorMessage, &dependentQtLibs,
+                            std::bind(isQtModule, std::placeholders::_1), &wordSize, &detectedDebug))
                     return result;
             }
             if (optVerboseLevel >= 1) {
@@ -1220,10 +1248,9 @@ static DeployResult deploy(const Options &options,
             options.directory : options.libraryDirectory;
         QStringList libraries = deployedQtLibraries;
         if (options.compilerRunTime)
-            libraries.append(compilerRunTimeLibs(options.platform, wordSize));
+            libraries.append(compilerRunTimeLibs(options.platform, options.compilerRunTimeDirectory, dependentQtLibs, wordSize));
         foreach (const QString &qtLib, libraries) {
-            if (!updateFile(qtLib, targetPath, options.updateFileFlags, options.json, errorMessage))
-                return result;
+            updateFile(qtLib, targetPath, options.updateFileFlags, options.json, errorMessage);
         }
     } // optLibraries
 
