@@ -224,21 +224,32 @@ enum UpdateFileFlag  {
 };
 
 template <class DirectoryFileEntryFunction>
-bool updateFile(const QString &sourceFileName,
+bool updateFile(QString sourceFileName,
                 DirectoryFileEntryFunction directoryFileEntryFunction,
                 const QString &targetDirectory,
                 unsigned flags,
                 JsonOutput *json,
                 QString *errorMessage)
 {
-    const QFileInfo sourceFileInfo(sourceFileName);
-    const QString targetFileName = targetDirectory + QLatin1Char('/') + sourceFileInfo.fileName();
+    QFileInfo sourceFileInfo(sourceFileName);
+    QString targetFileName = targetDirectory + QLatin1Char('/') + sourceFileInfo.fileName();
     if (optVerboseLevel > 1)
         std::wcout << "Checking " << sourceFileName << ", " << targetFileName << '\n';
 
     if (!sourceFileInfo.exists()) {
+#ifdef Q_OS_LINUX
+        // Qt links to libraries in capitical characters, but mingw stores them as lowercase
+        sourceFileName = sourceFileName.toLower();
+        sourceFileInfo = QFileInfo(sourceFileName);
+        targetFileName = targetDirectory + QLatin1Char('/') + sourceFileInfo.fileName();
+        if (!sourceFileInfo.exists()) {
+            *errorMessage = QString::fromLatin1("%1 does not exist.").arg(QDir::toNativeSeparators(sourceFileName));
+            return false;
+        }
+#else
         *errorMessage = QString::fromLatin1("%1 does not exist.").arg(QDir::toNativeSeparators(sourceFileName));
         return false;
+#endif
     }
 
     const QFileInfo targetFileInfo(targetFileName);

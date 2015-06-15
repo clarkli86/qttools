@@ -657,9 +657,18 @@ static bool findDependentLibraries(const QString &binDir, const QString &binary,
     if (directDependencyCount)
         *directDependencyCount = 0;
     if (!readExecutable(binary, platform, errorMessage, &dependentLibs, wordSize, isDebug)) {
+#ifdef Q_OS_LINUX
+        // Qt links to some libraries with all capital characters. Try again with lowercase name
+        if (!readExecutable(binary.toLower(), platform, errorMessage, &dependentLibs, wordSize, isDebug)) {
+            errorMessage->prepend(QLatin1String("Unable to find dependent libraries of ") +
+                                  QDir::toNativeSeparators(binary) + QLatin1String(" :"));
+            return false;
+        }
+#else
         errorMessage->prepend(QLatin1String("Unable to find dependent libraries of ") +
                               QDir::toNativeSeparators(binary) + QLatin1String(" :"));
         return false;
+#endif
     }
     // Filter out the Qt libraries. Note that depends.exe finds libs from optDirectory if we
     // are run the 2nd time (updating). We want to check against the Qt bin dir libraries
@@ -674,10 +683,9 @@ static bool findDependentLibraries(const QString &binDir, const QString &binary,
     const int end = result->size();
     if (directDependencyCount)
         *directDependencyCount = end - start;
-    // Recurse
+    // Recurse. Discard the return value because the dependent library might not be at binDir
     for (int i = start; i < end; ++i)
-        if (!findDependentLibraries(binDir, result->at(i), platform, errorMessage, result, filter, 0, 0, 0, recursionDepth + 1))
-            return false;
+        findDependentLibraries(binDir, result->at(i), platform, errorMessage, result, filter, 0, 0, 0, recursionDepth + 1);
     return true;
 }
 
@@ -1249,6 +1257,7 @@ static DeployResult deploy(const Options &options,
         QStringList libraries = deployedQtLibraries;
         if (options.compilerRunTime)
             libraries.append(compilerRunTimeLibs(options.platform, options.compilerRunTimeDirectory, dependentQtLibs, wordSize));
+            libraries.append(compilerRunTimeLibs(options.platform, options.compilerRunTimeDirectory, plugins, wordSize));
         foreach (const QString &qtLib, libraries) {
             updateFile(qtLib, targetPath, options.updateFileFlags, options.json, errorMessage);
         }
