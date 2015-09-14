@@ -639,11 +639,11 @@ static inline bool isQtModule(const QString &libName)
 {
     // Match Standard modules, Qt5XX.dll, Qt[Commercial]Charts.dll and special cases.
     return libName.size() > 2
-        && ((libName.startsWith(QLatin1String("Qt"), Qt::CaseInsensitive) && libName.at(2).isDigit())
-            || libName.startsWith(QLatin1String("QtCommercial"), Qt::CaseInsensitive)
-            || libName.startsWith(QLatin1String("QtCharts"), Qt::CaseInsensitive)
-            || libName.startsWith(QLatin1String("DataVisualization"), Qt::CaseInsensitive)
-            || libName.startsWith(QLatin1String("Enginio"), Qt::CaseInsensitive));
+        && ((libName.contains(QLatin1String("Qt"), Qt::CaseInsensitive))
+            || libName.contains(QLatin1String("QtCommercial"), Qt::CaseInsensitive)
+            || libName.contains(QLatin1String("QtCharts"), Qt::CaseInsensitive)
+            || libName.contains(QLatin1String("DataVisualization"), Qt::CaseInsensitive)
+            || libName.contains(QLatin1String("Enginio"), Qt::CaseInsensitive));
 }
 
 // Helper for recursively finding all dependent Qt libraries.
@@ -1025,10 +1025,14 @@ static inline int qtVersion(const QMap<QString, QString> &qmakeVariables)
 // Determine the Qt lib infix from the library path of "Qt5Core<qtblibinfix>[d].dll".
 static inline QString qtlibInfixFromCoreLibName(const QString &path, bool isDebug, Platform platform)
 {
-    const int startPos = path.lastIndexOf(QLatin1Char('/')) + 8;
-    int endPos = path.lastIndexOf(QLatin1Char('.'));
-    if (isDebug && (platform & WindowsBased))
+    int startPos = path.lastIndexOf(QLatin1Char('/')) + 11;
+    int endPos = path.indexOf(QLatin1Char('.'));
+    if (isDebug && (platform & WindowsBased)) {
+        // Windows does not have lib prefix
+        startPos -= 3;
+        // remove d (debug) from library name
         endPos--;
+    }
     return endPos > startPos ? path.mid(startPos, endPos - startPos) : QString();
 }
 
