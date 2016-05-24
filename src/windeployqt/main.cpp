@@ -939,7 +939,7 @@ static QString libraryPath(const QString &libraryLocation, const char *name,
     return result;
 }
 
-static QStringList compilerRunTimeLibs(Platform platform, const QString & compilerRunTimeDirectory, QStringList dependentLibs, unsigned wordSize)
+static QStringList compilerRunTimeLibs(Platform platform, const QStringList & binaries, const QString & compilerRunTimeDirectory, QStringList dependentLibs, unsigned wordSize)
 {
     QStringList result;
     switch (platform) {
@@ -966,10 +966,16 @@ static QStringList compilerRunTimeLibs(Platform platform, const QString & compil
             result.append(dllFile);
         }
 
-        // Find all dependencies in compiler runtime director
+        // Find all dependencies in compiler runtime directory
         for(auto & lib : dependentLibs) {
             QString errorMessage;
             findDependentLibraries(binPath, lib, platform, &errorMessage, &result);
+        }
+
+        // Find all dependencies of the original binaries in compiler runtime directory
+        for(auto & binary: binaries) {
+            QString errorMessage;
+            findDependentLibraries(binPath, binary, platform, &errorMessage, &result);
         }
     }
         break;
@@ -1260,8 +1266,8 @@ static DeployResult deploy(const Options &options,
             options.directory : options.libraryDirectory;
         QStringList libraries = deployedQtLibraries;
         if (options.compilerRunTime)
-            libraries.append(compilerRunTimeLibs(options.platform, options.compilerRunTimeDirectory, dependentQtLibs, wordSize));
-            libraries.append(compilerRunTimeLibs(options.platform, options.compilerRunTimeDirectory, plugins, wordSize));
+            libraries.append(compilerRunTimeLibs(options.platform, options.binaries, options.compilerRunTimeDirectory, dependentQtLibs, wordSize));
+            libraries.append(compilerRunTimeLibs(options.platform, options.binaries, options.compilerRunTimeDirectory, plugins, wordSize));
         foreach (const QString &qtLib, libraries) {
             updateFile(qtLib, targetPath, options.updateFileFlags, options.json, errorMessage);
         }
